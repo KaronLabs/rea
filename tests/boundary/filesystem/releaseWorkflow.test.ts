@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { runInNewContext } from "node:vm";
 import { expect, it } from "vitest";
 import { parse } from "yaml";
 import { z } from "zod";
@@ -33,23 +34,25 @@ async function readReleaseWorkflow() {
     .object({
       on: z.record(z.string(), z.unknown()),
       concurrency: z.object({ group: z.string() }),
-      jobs: z.object({
-        "release-proposal": jobSchema,
-        "release-please": jobSchema,
-        "merged-release": jobSchema,
-        qualification: z.object({
-          if: z.string(),
-          needs: z.array(z.string()),
-          uses: z.string(),
-          secrets: z.record(z.string(), z.string()),
-          with: z.record(z.string(), z.union([z.string(), z.boolean()])),
-        }),
-        publish: jobSchema,
-        rehearsal: jobSchema.extend({
-          permissions: z.record(z.string(), z.string()),
-        }),
-        "publish-mcp": jobSchema,
-      }),
+      jobs: z
+        .object({
+          "release-proposal": jobSchema,
+          "release-please": jobSchema,
+          "merged-release": jobSchema,
+          qualification: z.object({
+            if: z.string(),
+            needs: z.array(z.string()),
+            uses: z.string(),
+            secrets: z.record(z.string(), z.string()),
+            with: z.record(z.string(), z.union([z.string(), z.boolean()])),
+          }),
+          publish: jobSchema,
+          rehearsal: jobSchema.extend({
+            permissions: z.record(z.string(), z.string()),
+          }),
+          "publish-mcp": jobSchema,
+        })
+        .strict(),
     })
     .parse(
       parse(
@@ -60,6 +63,63 @@ async function readReleaseWorkflow() {
       ),
     );
 }
+
+it("restricts every release job to the canonical non-fork repository", async () => {
+  const { jobs } = await readReleaseWorkflow();
+  for (const job of Object.values(jobs)) {
+    expect(job.if).toContain("github.repository == 'morluto/rea'");
+    expect(job.if).toContain("github.event.repository.fork == false");
+  }
+});
+
+it.each(["push", "pull_request", "workflow_dispatch"])(
+  "blocks fork release jobs even when publication prerequisites pass: %s",
+  async (eventName) => {
+    const { jobs } = await readReleaseWorkflow();
+    for (const [repository, fork] of [
+      ["KaronLabs/rea", true],
+      ["KaronLabs/rea", false],
+      ["morluto/rea", true],
+    ] as const) {
+      for (const job of Object.values(jobs)) {
+        const release = {
+          result: "success",
+          outputs: { release_created: "true" },
+        };
+        expect(
+          runInNewContext(job.if!, {
+            github: {
+              repository,
+              event_name: eventName,
+              event: {
+                repository: { fork },
+                pull_request: {
+                  merged: true,
+                  head: {
+                    repo: { full_name: repository },
+                    ref: "release-please--branches--main--components--rea-agents",
+                  },
+                },
+              },
+            },
+            inputs: { phase: "publish" },
+            needs: {
+              "merged-release": release,
+              "release-please": release,
+              qualification: release,
+              rehearsal: release,
+              publish: release,
+            },
+            always: () => true,
+            cancelled: () => false,
+            startsWith: (value: string, prefix: string) =>
+              value.startsWith(prefix),
+          }),
+        ).toBe(false);
+      }
+    }
+  },
+);
 
 it("validates the source before release creation and the prepared candidate before generation", async () => {
   const steps = (await readReleaseWorkflow()).jobs["release-please"].steps;
@@ -106,7 +166,7 @@ it("keeps main pushes proposal-only and gates merged-release automation", async 
     branches: ["main"],
   });
   const proposal = workflow.jobs["release-proposal"];
-  expect(proposal.if).toBe("github.event_name == 'push'");
+  expect(proposal.if).toContain("github.event_name == 'push'");
   const action = proposal.steps.find((step) =>
     step.uses?.startsWith("googleapis/release-please-action@"),
   );
@@ -127,7 +187,7 @@ it("keeps main pushes proposal-only and gates merged-release automation", async 
     release_created: "${{ steps.release.outputs.release_created }}",
     sha: "${{ steps.release.outputs.sha }}",
   });
-  expect(workflow.jobs["release-please"].if).toBe(
+  expect(workflow.jobs["release-please"].if).toContain(
     "github.event_name == 'workflow_dispatch'",
   );
   expect(workflow.concurrency.group).toBe(
