@@ -104,3 +104,71 @@ Full application/OS/provider tests, release artifact rehearsal, registry write
 permissions and GitHub-hosted execution of the new guard remain unverified.
 No release PR was merged, no GitHub Release was created and no package was
 published during this review.
+
+## Final verification follow-up — 2026-10-28
+
+The base remains `4a4bbab3c337701febeb6b532ace49041c4876e0`; original PR #2
+head was `4880c78f3715c3fc28929f8cecf98a26527b68db`. All seven `release.yml`
+job guards independently deny `KaronLabs/rea`, including downstream jobs with
+successful prerequisites and `always()`. No production guard change was needed
+in that workflow.
+
+Two issues were found and addressed during final review:
+
+1. The original regression used JavaScript `vm` for GitHub expressions. On a
+   canonical non-fork context it misparsed `needs.merged-release` and
+   `needs.release-please` as subtraction and threw `ReferenceError: release is
+   not defined`. Negative fork cases short-circuited before this problem.
+   Tests now use GitHub's `@actions/expressions` parser/evaluator, pinned to
+   0.3.61 as a development-only dependency with no transitive dependencies.
+   They exercise all seven conditions for push, merged release PR and manual
+   publication, canonical/fork combinations, case-insensitive identity and
+   cancellation. Runner status functions and implicit `success()` are modeled
+   explicitly; this is local expression evaluation, not a GitHub-hosted run.
+2. `release-recovery.yml` was a separate manual MCP publication route. Its
+   verifier previously required only main and its publisher had no repository
+   condition. Existing historical-run and npm-integrity requirements remain;
+   both jobs now also require the canonical non-fork repository and main.
+   New tests check each job independently, including main/feature contexts.
+   No qualifying historical fork publication run or registry authority is assumed.
+
+Executed evidence:
+
+- Original five-file Vitest selection: 93 passed before test changes.
+- Adding canonical cases to the old VM test: 3 expected failures with the
+  hyphenated identifier error above; replacement evaluator passes.
+- Replacing guarded release YAML temporarily with base main: all 3 event
+  regression cases fail because a fork job is admitted. Restored afterward.
+- Adding an unknown unguarded job temporarily: strict parsing rejects
+  `unguarded-future-job`. Restored afterward.
+- New recovery regression on the old recovery YAML: expected failure because
+  `KaronLabs/rea` main admits the verify job.
+- After fixes, direct Vitest selection of releaseWorkflow, releaseCheckpoint,
+  releaseRecovery, releaseConfiguration and workflowActionPinning: **94 passed**.
+- `npm run typecheck`, native oxlint on both changed test files, oxfmt check on
+  changed workflow/test/manifest files, and `git diff --check`: all exit 0.
+
+Local Node is 24.22.1/npm 11.9.0, differing from the repository's
+24.18.0/npm 11.16.0 pins. Existing locked dependencies were reused and the new
+expression package installed separately. The repository's `test:local` wrapper
+refuses this compiled-boundary selection; `test:focused` preflight reports the
+reused installed dependency lock as stale. Direct Vitest executes these workflow
+and script fixtures without claiming the full build-dependent gate. Full
+application/provider suites and a fresh repository-wide `npm ci` were not run.
+
+GitHub observation: CI workflow ID `392447623` (`.github/workflows/ci.yml`)
+reports `disabled_manually`; original PR #2 head has zero workflow runs,
+check runs and commit statuses. Main has no required-check protection configured.
+The available GitHub connector cannot enable or dispatch workflows. Do not
+substitute historical main CI for current-head evidence or run old publication
+revisions. Proposed hosted verification after CI access is available: enable CI,
+run it at the final PR head, then dispatch the patched Release and Recovery
+workflows at that exact branch revision and verify 7 and 2 skipped jobs,
+respectively, without executing publisher steps.
+
+Human ownership remains pending. AGENTS.md and CONTRIBUTING.md require the
+human owner to review the final diff and evidence and complete Author readiness;
+AI review cannot supply those factual declarations. Publication authority is
+not required to merge a containment fix and remains unverified; it is required
+before any separate future publication enablement. PR #1 and registry contents
+were not changed. Main remains unprotected by this patch until PR #2 is merged.

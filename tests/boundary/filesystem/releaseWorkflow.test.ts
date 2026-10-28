@@ -3,7 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { runInNewContext } from "node:vm";
+import { data, Evaluator, Lexer, Parser } from "@actions/expressions";
 import { expect, it } from "vitest";
 import { parse } from "yaml";
 import { z } from "zod";
@@ -72,54 +72,158 @@ it("restricts every release job to the canonical non-fork repository", async () 
   }
 });
 
+// GitHub identifiers may contain hyphens, comparisons ignore string case, and
+// missing context properties coerce differently from JavaScript. Use its parser
+// and evaluator; model runner status functions explicitly for these scenarios.
+function evaluateJobCondition(
+  condition: string,
+  context: Record<string, unknown>,
+  cancelled = false,
+) {
+  const functions = new Map(
+    Object.entries({ always: true, cancelled, success: !cancelled }).map(
+      ([name, value]) => [
+        name,
+        {
+          name,
+          minArgs: 0,
+          maxArgs: 0,
+          call: () => new data.BooleanData(value),
+        },
+      ],
+    ),
+  );
+  const expression = /\b(always|cancelled|success|failure)\s*\(/u.test(
+    condition,
+  )
+    ? condition
+    : `success() && (${condition})`;
+  const { tokens } = new Lexer(expression).lex();
+  const tree = new Parser(tokens, Object.keys(context), [
+    ...functions.values(),
+  ]).parse();
+  return new Evaluator(
+    tree,
+    JSON.parse(JSON.stringify(context), data.reviver) as data.Dictionary,
+    functions,
+  )
+    .evaluate()
+    .coerceString();
+}
+
 it.each(["push", "pull_request", "workflow_dispatch"])(
-  "blocks fork release jobs even when publication prerequisites pass: %s",
+  "evaluates every job with GitHub semantics for fork and canonical contexts: %s",
   async (eventName) => {
     const { jobs } = await readReleaseWorkflow();
-    for (const [repository, fork] of [
-      ["KaronLabs/rea", true],
-      ["KaronLabs/rea", false],
-      ["morluto/rea", true],
+    const admitted = {
+      push: [
+        "release-proposal",
+        "qualification",
+        "rehearsal",
+        "publish",
+        "publish-mcp",
+      ],
+      pull_request: [
+        "merged-release",
+        "qualification",
+        "rehearsal",
+        "publish",
+        "publish-mcp",
+      ],
+      workflow_dispatch: [
+        "release-please",
+        "qualification",
+        "rehearsal",
+        "publish",
+        "publish-mcp",
+      ],
+    }[eventName]!;
+    for (const [repository, fork, canonical] of [
+      ["KaronLabs/rea", true, false],
+      ["KaronLabs/rea", false, false],
+      ["morluto/rea", true, false],
+      ["morluto/rea", false, true],
+      ["MORLUTO/REA", false, true],
     ] as const) {
-      for (const job of Object.values(jobs)) {
+      for (const [name, job] of Object.entries(jobs)) {
+        // Successful prerequisites are deliberately supplied even for push:
+        // downstream admission must independently enforce the repository guard.
         const release = {
           result: "success",
           outputs: { release_created: "true" },
         };
-        expect(
-          runInNewContext(job.if!, {
-            github: {
-              repository,
-              event_name: eventName,
-              event: {
-                repository: { fork },
-                pull_request: {
-                  merged: true,
-                  head: {
-                    repo: { full_name: repository },
-                    ref: "release-please--branches--main--components--rea-agents",
-                  },
+        const context = {
+          github: {
+            repository,
+            event_name: eventName,
+            event: {
+              repository: { fork },
+              pull_request: {
+                merged: true,
+                head: {
+                  repo: { full_name: repository },
+                  ref: "release-please--branches--main--components--rea-agents",
                 },
               },
             },
-            inputs: { phase: "publish" },
-            needs: {
-              "merged-release": release,
-              "release-please": release,
-              qualification: release,
-              rehearsal: release,
-              publish: release,
-            },
-            always: () => true,
-            cancelled: () => false,
-            startsWith: (value: string, prefix: string) =>
-              value.startsWith(prefix),
-          }),
-        ).toBe(false);
+          },
+          inputs: { phase: "publish" },
+          needs: {
+            "merged-release": release,
+            "release-please": release,
+            qualification: release,
+            rehearsal: release,
+            publish: release,
+          },
+        };
+        expect(
+          evaluateJobCondition(job.if!, context),
+          `${repository}/${name}`,
+        ).toBe(canonical && admitted.includes(name) ? "true" : "false");
+        expect(
+          evaluateJobCondition(job.if!, context, true),
+          `cancelled/${name}`,
+        ).toBe("false");
       }
     }
   },
 );
+
+it("blocks fork recovery verification and MCP publication independently", async () => {
+  const workflow = z
+    .object({
+      jobs: z
+        .object({
+          verify: z.object({ if: z.string().optional() }),
+          "publish-mcp": z.object({ if: z.string().optional() }),
+        })
+        .strict(),
+    })
+    .parse(
+      parse(await readFile(".github/workflows/release-recovery.yml", "utf8")),
+    );
+  for (const [repository, fork, canonical] of [
+    ["KaronLabs/rea", true, false],
+    ["KaronLabs/rea", false, false],
+    ["morluto/rea", true, false],
+    ["morluto/rea", false, true],
+  ] as const) {
+    for (const ref of ["refs/heads/main", "refs/heads/feature/test"]) {
+      for (const [name, job] of Object.entries(workflow.jobs)) {
+        const context = {
+          github: { repository, ref, event: { repository: { fork } } },
+        };
+        expect(
+          evaluateJobCondition(job.if ?? "true", context),
+          `${repository}/${ref}/${name}`,
+        ).toBe(canonical && ref === "refs/heads/main" ? "true" : "false");
+        expect(evaluateJobCondition(job.if ?? "true", context, true)).toBe(
+          "false",
+        );
+      }
+    }
+  }
+});
 
 it("validates the source before release creation and the prepared candidate before generation", async () => {
   const steps = (await readReleaseWorkflow()).jobs["release-please"].steps;
