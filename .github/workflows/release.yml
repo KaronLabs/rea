@@ -32,10 +32,14 @@ concurrency:
   group: release-${{ inputs.release_branch || github.event.pull_request.merge_commit_sha || github.ref_name }}
   cancel-in-progress: false
 
+# This workflow publishes upstream-owned package and MCP identities.
+# Forks must define and verify their own publishing destinations before enabling it.
 jobs:
   release-proposal:
     name: Update release proposal
-    if: github.event_name == 'push'
+    if: >-
+      github.repository == 'morluto/rea' && github.event.repository.fork == false &&
+      github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -64,6 +68,7 @@ jobs:
   merged-release:
     name: Release reviewed main merge
     if: >-
+      github.repository == 'morluto/rea' && github.event.repository.fork == false &&
       github.event_name == 'pull_request' && github.event.pull_request.merged == true &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       startsWith(github.event.pull_request.head.ref, 'release-please--branches--main--')
@@ -135,7 +140,9 @@ jobs:
 
   release-please:
     name: Release Please
-    if: github.event_name == 'workflow_dispatch'
+    if: >-
+      github.repository == 'morluto/rea' && github.event.repository.fork == false &&
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -301,6 +308,7 @@ jobs:
     needs: [merged-release, release-please]
     if: >-
       always() && !cancelled() &&
+      github.repository == 'morluto/rea' && github.event.repository.fork == false &&
       ((needs.merged-release.result == 'success' && needs.merged-release.outputs.release_created == 'true') ||
       (needs.release-please.result == 'success' && inputs.phase == 'publish' && needs.release-please.outputs.release_created == 'true'))
     permissions:
@@ -317,7 +325,8 @@ jobs:
     name: Rehearse qualified release on a clean runner
     needs: [merged-release, release-please, qualification]
     if: >-
-      always() && !cancelled() && needs.qualification.result == 'success'
+      always() && !cancelled() &&
+      github.repository == 'morluto/rea' && github.event.repository.fork == false && needs.qualification.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -346,6 +355,7 @@ jobs:
     needs: [merged-release, release-please, qualification, rehearsal]
     if: >-
       always() && !cancelled() &&
+      github.repository == 'morluto/rea' && github.event.repository.fork == false &&
       needs.qualification.result == 'success' && needs.rehearsal.result == 'success'
     runs-on: ubuntu-latest
     permissions:
@@ -400,7 +410,8 @@ jobs:
     name: Publish to MCP Registry
     needs: [merged-release, release-please, publish]
     if: >-
-      always() && !cancelled() && needs.publish.result == 'success' &&
+      always() && !cancelled() &&
+      github.repository == 'morluto/rea' && github.event.repository.fork == false && needs.publish.result == 'success' &&
       ((needs.merged-release.result == 'success' && needs.merged-release.outputs.release_created == 'true') ||
       (needs.release-please.result == 'success' && inputs.phase == 'publish' && needs.release-please.outputs.release_created == 'true'))
     runs-on: ubuntu-latest
