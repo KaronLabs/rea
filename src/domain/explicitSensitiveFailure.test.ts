@@ -1,6 +1,6 @@
-import { AnalysisAccessDeniedError } from "./analysisErrorCore.js";
-import { expect, it } from "vitest";
+import { EvidenceFileError } from "./evidenceErrors.js";
 import {
+  AnalysisAccessDeniedError,
   AnalysisInputError,
   AnalysisCapabilityUnavailableError,
   AnalysisCancelledError,
@@ -9,6 +9,7 @@ import {
   AnalysisOutputError,
   AnalysisResourceConstraintError,
 } from "./analysisErrorCore.js";
+import { expect, it } from "vitest";
 import { projectAnalysisError } from "./analysisErrorProjection.js";
 import { ProviderCleanupError } from "./providerCleanupError.js";
 import { ProviderAdapterError } from "./providerAdapterError.js";
@@ -186,6 +187,59 @@ it("keeps a named timeout control through explicit-value redaction", () => {
   expect(JSON.stringify(projected)).not.toContain("explicit-secret");
 });
 
+it.each([
+  {
+    name: "populated startup diagnostics",
+    options: {
+      envName: "REA_GHIDRA_STARTUP_TIMEOUT_MS",
+      elapsedMs: 251,
+      targetBytes: 4096,
+    },
+    values: ["private"],
+    expected: {
+      env_name: "REA_GHIDRA_STARTUP_TIMEOUT_MS",
+      elapsed_ms: 251,
+      target_bytes: 4096,
+    },
+  },
+  {
+    name: "zero measurements",
+    options: { elapsedMs: 0, targetBytes: 0 },
+    values: ["private"],
+    expected: { elapsed_ms: 0, target_bytes: 0 },
+  },
+  {
+    name: "omitted measurements",
+    options: {},
+    values: ["private"],
+    expected: {},
+  },
+  {
+    name: "explicitly excluded setting name",
+    options: { envName: "REA_GHIDRA_STARTUP_TIMEOUT_MS", elapsedMs: 251 },
+    values: ["private", "REA_GHIDRA"],
+    expected: { env_name: "[REDACTED]_STARTUP_TIMEOUT_MS", elapsed_ms: 251 },
+  },
+])(
+  "preserves $name through timeout redaction and projection",
+  ({ options, values, expected }) => {
+    const error = new AnalysisTimeoutError("list_documents", 250, {
+      ...options,
+      diagnostics: { note: "private startup" },
+    });
+    const projected = projectAnalysisError(
+      redactExplicitFailure(error, values),
+    );
+    expect(projected.code).toBe("provider_timeout");
+    expect(projected.details).toEqual({
+      operation: "list_documents",
+      timeout_ms: 250,
+      ...expected,
+      diagnostics: { note: "[REDACTED] startup" },
+    });
+  },
+);
+
 it("keeps unsupported profile reasons distinct from malformed input", () => {
   const error = new AnalysisCapabilityUnavailableError(
     "mitmproxy",
@@ -283,4 +337,26 @@ it("does not reinterpret an unknown argument name as a JSON pointer", () => {
   if (!(result instanceof AnalysisInputError))
     throw new Error("Input error required");
   expect(result.issues[0]?.path).toEqual([]);
+});
+
+it("preserves completed publication and live cleanup while excluding marked file identities", () => {
+  const original = new EvidenceFileError("write", "io", {
+    path: "/private-marker/output.json",
+    published: { path: "/private-marker/output.json", bytes: 42 },
+    cleanup: {
+      reason: "private-marker staging failed",
+      resources: ["/private-marker/stage"],
+    },
+  });
+  const redacted = redactExplicitFailure(original, ["private-marker"]);
+  const projected = projectAnalysisError(redacted);
+  expect(projected).toMatchObject({
+    code: "cleanup_incomplete",
+    details: { published: true, bytes: 42 },
+  });
+  expect(projected.details).not.toHaveProperty("path");
+  expect(projected.details).not.toHaveProperty("published_path");
+  expect(JSON.stringify(projected)).not.toContain("private-marker");
+  original.resolveCleanup();
+  expect(redacted.cleanupIncomplete).toBe(false);
 });
