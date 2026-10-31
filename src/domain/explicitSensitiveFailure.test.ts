@@ -1,6 +1,6 @@
-import { AnalysisAccessDeniedError } from "./analysisErrorCore.js";
-import { expect, it } from "vitest";
+import { EvidenceFileError } from "./evidenceErrors.js";
 import {
+  AnalysisAccessDeniedError,
   AnalysisInputError,
   AnalysisCapabilityUnavailableError,
   AnalysisCancelledError,
@@ -9,6 +9,7 @@ import {
   AnalysisOutputError,
   AnalysisResourceConstraintError,
 } from "./analysisErrorCore.js";
+import { expect, it } from "vitest";
 import { projectAnalysisError } from "./analysisErrorProjection.js";
 import { ProviderCleanupError } from "./providerCleanupError.js";
 import { ProviderAdapterError } from "./providerAdapterError.js";
@@ -186,80 +187,6 @@ it("keeps a named timeout control through explicit-value redaction", () => {
   expect(JSON.stringify(projected)).not.toContain("explicit-secret");
 });
 
-it.each([
-  {
-    label: "producer guidance",
-    userMessage: "Unknown procedure explicit-secret",
-    remediationAction: "Use list_procedures instead of explicit-secret",
-    expectedMessage: "Unknown procedure [REDACTED]",
-    expectedAction: "Use list_procedures instead of [REDACTED]",
-  },
-  {
-    label: "empty guidance",
-    userMessage: "",
-    remediationAction: "",
-    expectedMessage: "",
-    expectedAction: "",
-  },
-  {
-    label: "absent guidance",
-    userMessage: undefined,
-    remediationAction: undefined,
-    expectedMessage: undefined,
-    expectedAction: undefined,
-  },
-])("preserves $label on redacted input failures", (fixture) => {
-  const error = new AnalysisInputError(
-    "procedure_pseudo_code",
-    {
-      ...context,
-      ...(fixture.userMessage === undefined
-        ? {}
-        : { userMessage: fixture.userMessage }),
-      ...(fixture.remediationAction === undefined
-        ? {}
-        : { remediationAction: fixture.remediationAction }),
-    },
-    [
-      {
-        path: ["procedure"],
-        reason: "invalid_value",
-        message: "explicit-secret",
-      },
-    ],
-  );
-  const redacted = redactExplicitFailure(error, ["explicit-secret"]);
-  expect(redacted).toBeInstanceOf(AnalysisInputError);
-  if (!(redacted instanceof AnalysisInputError))
-    throw new Error("Input error required");
-  expect({
-    userMessage: redacted.userMessage,
-    remediationAction: redacted.remediationAction,
-  }).toEqual({
-    userMessage: fixture.expectedMessage,
-    remediationAction: fixture.expectedAction,
-  });
-  const projected = projectAnalysisError(redacted);
-  expect(projected).toMatchObject({
-    code: "invalid_request",
-    recovery: { kind: "inspect_input_contract", operation: error.operation },
-    details: {
-      issues: [
-        { path: ["procedure"], reason: "invalid_value", message: "[REDACTED]" },
-      ],
-    },
-  });
-  if (fixture.expectedMessage !== undefined)
-    expect(projected.message).toBe(fixture.expectedMessage);
-  if (fixture.expectedAction !== undefined)
-    expect(projected.remediation.action).toBe(fixture.expectedAction);
-  else
-    expect(projected.remediation.action).toContain(
-      "Read the declared input schema",
-    );
-  expect(JSON.stringify(projected)).not.toContain("explicit-secret");
-});
-
 it("keeps unsupported profile reasons distinct from malformed input", () => {
   const error = new AnalysisCapabilityUnavailableError(
     "mitmproxy",
@@ -357,4 +284,100 @@ it("does not reinterpret an unknown argument name as a JSON pointer", () => {
   if (!(result instanceof AnalysisInputError))
     throw new Error("Input error required");
   expect(result.issues[0]?.path).toEqual([]);
+});
+
+it("preserves completed publication and live cleanup while excluding marked file identities", () => {
+  const original = new EvidenceFileError("write", "io", {
+    path: "/private-marker/output.json",
+    published: { path: "/private-marker/output.json", bytes: 42 },
+    cleanup: {
+      reason: "private-marker staging failed",
+      resources: ["/private-marker/stage"],
+    },
+  });
+  const redacted = redactExplicitFailure(original, ["private-marker"]);
+  const projected = projectAnalysisError(redacted);
+  expect(projected).toMatchObject({
+    code: "cleanup_incomplete",
+    details: { published: true, bytes: 42 },
+  });
+  expect(projected.details).not.toHaveProperty("path");
+  expect(projected.details).not.toHaveProperty("published_path");
+  expect(JSON.stringify(projected)).not.toContain("private-marker");
+  original.resolveCleanup();
+  expect(redacted.cleanupIncomplete).toBe(false);
+});
+
+it.each([
+  {
+    label: "producer guidance",
+    userMessage: "Unknown procedure explicit-secret",
+    remediationAction: "Use list_procedures instead of explicit-secret",
+    expectedMessage: "Unknown procedure [REDACTED]",
+    expectedAction: "Use list_procedures instead of [REDACTED]",
+  },
+  {
+    label: "empty guidance",
+    userMessage: "",
+    remediationAction: "",
+    expectedMessage: "",
+    expectedAction: "",
+  },
+  {
+    label: "absent guidance",
+    userMessage: undefined,
+    remediationAction: undefined,
+    expectedMessage: undefined,
+    expectedAction: undefined,
+  },
+])("preserves $label on redacted input failures", (fixture) => {
+  const error = new AnalysisInputError(
+    "procedure_pseudo_code",
+    {
+      ...context,
+      ...(fixture.userMessage === undefined
+        ? {}
+        : { userMessage: fixture.userMessage }),
+      ...(fixture.remediationAction === undefined
+        ? {}
+        : { remediationAction: fixture.remediationAction }),
+    },
+    [
+      {
+        path: ["procedure"],
+        reason: "invalid_value",
+        message: "explicit-secret",
+      },
+    ],
+  );
+  const redacted = redactExplicitFailure(error, ["explicit-secret"]);
+  expect(redacted).toBeInstanceOf(AnalysisInputError);
+  if (!(redacted instanceof AnalysisInputError))
+    throw new Error("Input error required");
+  expect({
+    userMessage: redacted.userMessage,
+    remediationAction: redacted.remediationAction,
+  }).toEqual({
+    userMessage: fixture.expectedMessage,
+    remediationAction: fixture.expectedAction,
+  });
+  const projected = projectAnalysisError(redacted);
+  expect(projected).toMatchObject({
+    code: "invalid_request",
+    recovery: { kind: "inspect_input_contract", operation: error.operation },
+    details: {
+      issues: [
+        { path: ["procedure"], reason: "invalid_value", message: "[REDACTED]" },
+      ],
+    },
+  });
+  if (fixture.expectedMessage !== undefined)
+    expect(projected.message).toBe(fixture.expectedMessage);
+  if (fixture.expectedAction !== undefined)
+    expect(projected.remediation.action).toBe(fixture.expectedAction);
+  else
+    expect(projected.remediation.action).toContain(
+      "Read the declared input schema",
+    );
+  expect(JSON.stringify(projected)).not.toContain("explicit-secret");
 });
